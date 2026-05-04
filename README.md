@@ -45,6 +45,14 @@ sudo chown -R 10001:10001 data/media data/staticfiles
 
 PostgreSQL administra permisos propios dentro de `data/postgres`.
 
+El Compose incluye un servicio corto `setup-permissions` que prepara permisos de `data/media` y `data/staticfiles` para el usuario no root de Django (`uid 10001`). Si venis de una version anterior y ya existen archivos con otro propietario, recrea con:
+
+```bash
+docker compose down
+docker compose up --build -d setup-permissions
+docker compose up --build -d
+```
+
 ## Configuracion `.env`
 
 El archivo `.env` controla Django, Docker, PostgreSQL y el comportamiento del procesador de cola. Para empezar:
@@ -57,7 +65,7 @@ Ejemplo recomendado para Docker:
 
 ```env
 DJANGO_SECRET_KEY=generar-una-clave-larga-y-secreta
-DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,mail-api.example.com
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,mail-api.example.com
 DJANGO_CSRF_TRUSTED_ORIGINS=https://mail-api.example.com
 EMAIL_GATEWAY_API_KEY=token-largo-para-los-clientes
 EMAIL_GATEWAY_CONFIG=/app/config.yml
@@ -77,7 +85,7 @@ Detalle de cada variable:
 | Variable | Descripcion | Ejemplo |
 | --- | --- | --- |
 | `DJANGO_SECRET_KEY` | Clave interna de Django. Debe ser larga, privada y distinta por ambiente. | `DJANGO_SECRET_KEY=...` |
-| `DJANGO_ALLOWED_HOSTS` | Hosts desde donde Django acepta requests. Separar por comas. | `localhost,127.0.0.1,mail-api.example.com` |
+| `DJANGO_ALLOWED_HOSTS` | Hosts desde donde Django acepta requests. Separar por comas. Incluir `web` para pruebas internas de Compose y la IP/dominio real para acceso externo. | `localhost,127.0.0.1,web,mail-api.example.com` |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | Origenes HTTPS confiables si publicas detras de dominio/proxy. Separar por comas. | `https://mail-api.example.com` |
 | `EMAIL_GATEWAY_API_KEY` | Token que deben mandar los clientes. Si queda vacio, la API queda sin autenticacion. | `Authorization: Bearer token-largo` |
 | `EMAIL_GATEWAY_CONFIG` | Ruta del archivo SMTP dentro del contenedor. En Docker debe ser `/app/config.yml`. | `/app/config.yml` |
@@ -95,6 +103,7 @@ Notas:
 
 - En desarrollo local con SQLite, `EMAIL_GATEWAY_CONFIG` puede omitirse y Django busca `config.yml` en la raiz del proyecto.
 - En Docker, `config.yml` se monta en `/app/config.yml`, por eso `EMAIL_GATEWAY_CONFIG=/app/config.yml`.
+- En Docker conviene mantener `web` dentro de `DJANGO_ALLOWED_HOSTS` para diagnosticar desde la red interna de Compose.
 - Si usas varios procesos Gunicorn, desactiva el hilo interno y usa un unico worker externo para preservar el orden de envio.
 
 ## Configuracion `config.yml`
@@ -289,16 +298,55 @@ Usa solo una estrategia principal de envio para conservar el orden: hilo interno
 
 ## Seguridad Docker
 
-- Solo Nginx expone puerto al host: `8184:80`.
+- Solo Nginx expone puerto al host: `8184:8080`.
 - PostgreSQL no publica puertos fuera de la red interna de Compose.
 - La red `backend` es interna; solo `web`, `worker` y `db` participan. Nginx queda en `frontend` y no accede directo a PostgreSQL.
 - `config.yml` se monta de solo lectura en `/app/config.yml`.
 - Adjuntos, static files y datos de PostgreSQL quedan delimitados a `./data/`.
-- Los contenedores `web`, `worker` y `nginx` usan `read_only`, `tmpfs` para rutas temporales, `cap_drop: [ALL]` y `no-new-privileges:true`.
+- Los contenedores `web` y `worker` usan `read_only`, `tmpfs` para rutas temporales y `no-new-privileges:true`.
+- `web` y `worker` usan `cap_drop: [ALL]`.
+- Nginx usa la imagen `nginxinc/nginx-unprivileged`, escucha en `8080` dentro del contenedor y no corre como root. El hardening extra de capabilities queda desactivado en Nginx para evitar resets del puerto publicado en algunos runtimes Docker.
 - La imagen de Django corre con usuario no root `app` (`uid 10001`).
+- `setup-permissions` corre como root solo para preparar ownership de `data/media` y `data/staticfiles`, termina y no queda expuesto.
 - Usa siempre `EMAIL_GATEWAY_API_KEY` con un token largo y no publiques `.env` ni `config.yml`.
 - Cambia `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` y las credenciales SMTP antes de produccion.
 - Si publicas detras de un proxy externo con TLS, agrega el dominio real a `DJANGO_ALLOWED_HOSTS` y `DJANGO_CSRF_TRUSTED_ORIGINS`.
+
+## Problemas Comunes En Docker
+
+### `PermissionError: /app/staticfiles/admin`
+
+Significa que `collectstatic` no puede escribir en `./data/staticfiles` desde el usuario no root `10001`. Ejecuta:
+
+```bash
+docker compose down
+docker compose up --build -d setup-permissions
+docker compose up --build -d
+```
+
+En Linux tambien podes corregirlo desde el host:
+
+```bash
+sudo chown -R 10001:10001 data/media data/staticfiles
+```
+
+### `nginx: chown("/var/cache/nginx/client_temp", 101) failed`
+
+Este error aparece con la imagen oficial de Nginx cuando corre con hardening estricto. El Compose usa `nginxinc/nginx-unprivileged`, que arranca sin root, escucha en `8080` dentro del contenedor y evita el `chown` de arranque de la imagen oficial.
+
+### `host not found in upstream "web"`
+
+Suele aparecer cuando Nginx arranca mientras `web` esta fallando o reiniciando. El Compose ahora agrega `healthcheck` en `web` y Nginx espera a que Django responda `/health/`.
+
+### `HTTP/1.1 400 Bad Request` al probar `http://web:8000/health/`
+
+Django esta rechazando el header `Host`. Agrega `web` a `DJANGO_ALLOWED_HOSTS` y reinicia:
+
+```env
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,tu-dominio-o-ip
+```
+
+Para acceso externo, tambien agrega la IP o dominio usado en el curl. Por ejemplo, si llamas `http://10.0.0.20:8184`, `10.0.0.20` debe estar en `DJANGO_ALLOWED_HOSTS`.
 
 ## API
 
@@ -403,6 +451,7 @@ Los correos `failed` no se descartan: el worker los vuelve a tomar automaticamen
 ## Checklist De Produccion
 
 - Usar dominio real en `DJANGO_ALLOWED_HOSTS`.
+- Mantener `web` en `DJANGO_ALLOWED_HOSTS` para healthchecks y diagnostico interno de Compose.
 - Si hay proxy/TLS externo, configurar `DJANGO_CSRF_TRUSTED_ORIGINS=https://tu-dominio`.
 - No exponer PostgreSQL al host.
 - No versionar `.env`, `config.yml` ni `data/`.
