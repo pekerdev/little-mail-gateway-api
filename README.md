@@ -45,6 +45,150 @@ sudo chown -R 10001:10001 data/media data/staticfiles
 
 PostgreSQL administra permisos propios dentro de `data/postgres`.
 
+## Configuracion `.env`
+
+El archivo `.env` controla Django, Docker, PostgreSQL y el comportamiento del procesador de cola. Para empezar:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Ejemplo recomendado para Docker:
+
+```env
+DJANGO_SECRET_KEY=generar-una-clave-larga-y-secreta
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,mail-api.example.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://mail-api.example.com
+EMAIL_GATEWAY_API_KEY=token-largo-para-los-clientes
+EMAIL_GATEWAY_CONFIG=/app/config.yml
+EMAIL_GATEWAY_INLINE_WORKER_ENABLED=true
+EMAIL_GATEWAY_INLINE_WORKER_START_DELAY_SECONDS=1
+EMAIL_GATEWAY_WORKER_SLEEP_SECONDS=2
+EMAIL_GATEWAY_BATCH_SIZE=10
+EMAIL_GATEWAY_PROCESSING_TIMEOUT_SECONDS=600
+POSTGRES_DB=mail_gateway
+POSTGRES_USER=mail_gateway
+POSTGRES_PASSWORD=password-largo-de-postgres
+HTTP_PORT=8184
+```
+
+Detalle de cada variable:
+
+| Variable | Descripcion | Ejemplo |
+| --- | --- | --- |
+| `DJANGO_SECRET_KEY` | Clave interna de Django. Debe ser larga, privada y distinta por ambiente. | `DJANGO_SECRET_KEY=...` |
+| `DJANGO_ALLOWED_HOSTS` | Hosts desde donde Django acepta requests. Separar por comas. | `localhost,127.0.0.1,mail-api.example.com` |
+| `DJANGO_CSRF_TRUSTED_ORIGINS` | Origenes HTTPS confiables si publicas detras de dominio/proxy. Separar por comas. | `https://mail-api.example.com` |
+| `EMAIL_GATEWAY_API_KEY` | Token que deben mandar los clientes. Si queda vacio, la API queda sin autenticacion. | `Authorization: Bearer token-largo` |
+| `EMAIL_GATEWAY_CONFIG` | Ruta del archivo SMTP dentro del contenedor. En Docker debe ser `/app/config.yml`. | `/app/config.yml` |
+| `EMAIL_GATEWAY_INLINE_WORKER_ENABLED` | Activa el hilo interno que envia la cola desde el servicio `web`. | `true` |
+| `EMAIL_GATEWAY_INLINE_WORKER_START_DELAY_SECONDS` | Espera inicial antes de arrancar el hilo interno. | `1` |
+| `EMAIL_GATEWAY_WORKER_SLEEP_SECONDS` | Segundos de espera cuando no hay correos elegibles. | `2` |
+| `EMAIL_GATEWAY_BATCH_SIZE` | Cantidad maxima de correos procesados por vuelta. | `10` |
+| `EMAIL_GATEWAY_PROCESSING_TIMEOUT_SECONDS` | Libera correos trabados en `processing` despues de este tiempo. | `600` |
+| `POSTGRES_DB` | Nombre de la base PostgreSQL usada en Docker. | `mail_gateway` |
+| `POSTGRES_USER` | Usuario PostgreSQL. | `mail_gateway` |
+| `POSTGRES_PASSWORD` | Password PostgreSQL. Cambiar siempre en produccion. | `password-largo` |
+| `HTTP_PORT` | Puerto expuesto en el host para Nginx. | `8184` |
+
+Notas:
+
+- En desarrollo local con SQLite, `EMAIL_GATEWAY_CONFIG` puede omitirse y Django busca `config.yml` en la raiz del proyecto.
+- En Docker, `config.yml` se monta en `/app/config.yml`, por eso `EMAIL_GATEWAY_CONFIG=/app/config.yml`.
+- Si usas varios procesos Gunicorn, desactiva el hilo interno y usa un unico worker externo para preservar el orden de envio.
+
+## Configuracion `config.yml`
+
+El archivo `config.yml` contiene solo la configuracion SMTP. Para empezar:
+
+```powershell
+Copy-Item config.example.yml config.yml
+```
+
+Formato completo:
+
+```yaml
+smtp:
+  host: smtp.example.com
+  port: 587
+  username: notifications@example.com
+  password: password-o-app-password
+  from_email: notifications@example.com
+  from_name: Little Mail Gateway
+  use_tls: true
+  use_ssl: false
+  timeout: 30
+```
+
+Detalle de cada campo:
+
+| Campo | Descripcion | Requerido |
+| --- | --- | --- |
+| `host` | Servidor SMTP real. No dejar `smtp.example.com`. | Si |
+| `port` | Puerto SMTP. Normalmente `587` con TLS o `465` con SSL. | No, default `587` |
+| `username` | Usuario SMTP. Suele ser el correo completo. | Depende del proveedor |
+| `password` | Password SMTP o app password. | Depende del proveedor |
+| `from_email` | Correo remitente visible. | Si |
+| `from_name` | Nombre visible del remitente. | No |
+| `use_tls` | Usa STARTTLS, comunmente con puerto `587`. | No, default `true` |
+| `use_ssl` | Usa SSL directo, comunmente con puerto `465`. No usar junto con `use_tls`. | No, default `false` |
+| `timeout` | Timeout de conexion SMTP en segundos. | No, default `30` |
+
+Ejemplo con puerto 587:
+
+```yaml
+smtp:
+  host: smtp.tu-proveedor.com
+  port: 587
+  username: robotinfra@example.com
+  password: app-password
+  from_email: robotinfra@example.com
+  from_name: Robot Infra
+  use_tls: true
+  use_ssl: false
+  timeout: 30
+```
+
+Ejemplo con puerto 465:
+
+```yaml
+smtp:
+  host: smtp.tu-proveedor.com
+  port: 465
+  username: robotinfra@example.com
+  password: app-password
+  from_email: robotinfra@example.com
+  from_name: Robot Infra
+  use_tls: false
+  use_ssl: true
+  timeout: 30
+```
+
+Tambien se puede usar `config.json` si cambias `EMAIL_GATEWAY_CONFIG` a esa ruta:
+
+```json
+{
+  "smtp": {
+    "host": "smtp.tu-proveedor.com",
+    "port": 587,
+    "username": "robotinfra@example.com",
+    "password": "app-password",
+    "from_email": "robotinfra@example.com",
+    "from_name": "Robot Infra",
+    "use_tls": true,
+    "use_ssl": false,
+    "timeout": 30
+  }
+}
+```
+
+Errores comunes:
+
+- `[Errno 11001] getaddrinfo failed`: el `host` SMTP no existe, no resuelve DNS o sigue siendo `smtp.example.com`.
+- `SMTP config file not found`: `EMAIL_GATEWAY_CONFIG` apunta a una ruta incorrecta o no se monto `config.yml`.
+- Error de autenticacion SMTP: revisar `username`, `password`, app password, permisos SMTP y politicas del proveedor.
+- Timeout: revisar puerto, firewall, bloqueo de salida SMTP o si corresponde `use_tls`/`use_ssl`.
+
 ## Ejecutar en Docker Compose
 
 ```powershell
@@ -173,6 +317,48 @@ curl -X POST http://localhost:8184/api/v1/emails/ \
   }'
 ```
 
+JSON valido minimo:
+
+```json
+{
+  "recipients": ["persona@example.com"],
+  "subject": "Asunto del correo",
+  "html_body": "<p>Contenido HTML</p>"
+}
+```
+
+JSON valido con multiples destinatarios:
+
+```json
+{
+  "recipients": [
+    "persona@example.com",
+    "equipo@example.com",
+    "Nombre Apellido <nombre@example.com>"
+  ],
+  "subject": "Alerta de infraestructura",
+  "html_body": "<h1>Alerta</h1><p>Se detecto un evento importante.</p>"
+}
+```
+
+Tambien se aceptan alias de campos para compatibilidad:
+
+```json
+{
+  "to": "persona@example.com,equipo@example.com",
+  "subject": "Prueba",
+  "html": "<strong>Hola</strong>"
+}
+```
+
+Reglas del JSON:
+
+- `recipients` puede ser una lista JSON o un string separado por comas.
+- `subject` es obligatorio y no puede estar vacio.
+- `html_body` es obligatorio. Tambien se aceptan `html` o `body`.
+- Para adjuntos usar `multipart/form-data`; JSON puro no sube archivos.
+- No incluir credenciales SMTP en el payload. Las credenciales viven solo en `config.yml`.
+
 ### Encolar correo con adjuntos
 
 ```bash
@@ -194,3 +380,36 @@ curl -H "Authorization: Bearer change-this-token" \
 Estados posibles: `pending`, `processing`, `sent`, `failed`.
 
 Los correos `failed` no se descartan: el worker los vuelve a tomar automaticamente cuando llega su `next_attempt_at`. El estado `failed` indica que el ultimo intento fallo y que el correo esta esperando el proximo reintento.
+
+## Checklist De Puesta En Marcha
+
+- Copiar `.env.example` a `.env`.
+- Copiar `config.example.yml` a `config.yml`.
+- Cambiar `DJANGO_SECRET_KEY`.
+- Cambiar `EMAIL_GATEWAY_API_KEY` por un token largo.
+- Verificar `HTTP_PORT=8184`.
+- Configurar `POSTGRES_PASSWORD`.
+- Configurar `smtp.host`, `smtp.port`, `smtp.username`, `smtp.password`, `smtp.from_email` y `smtp.from_name`.
+- Verificar que `smtp.host` no sea `smtp.example.com`.
+- Crear carpetas locales si estas en Linux: `data/postgres`, `data/media`, `data/staticfiles`.
+- Ajustar permisos de `data/media` y `data/staticfiles` para `uid 10001` si corresponde.
+- Ejecutar `docker compose up --build -d`.
+- Revisar `docker compose logs -f web`.
+- Probar `GET /health/`.
+- Enviar un correo JSON de prueba.
+- Revisar el estado con `GET /api/v1/emails/<uuid>/`.
+- Ejecutar `send_queued_mail --dry-run` si algo queda pendiente.
+
+## Checklist De Produccion
+
+- Usar dominio real en `DJANGO_ALLOWED_HOSTS`.
+- Si hay proxy/TLS externo, configurar `DJANGO_CSRF_TRUSTED_ORIGINS=https://tu-dominio`.
+- No exponer PostgreSQL al host.
+- No versionar `.env`, `config.yml` ni `data/`.
+- Rotar `EMAIL_GATEWAY_API_KEY` si se comparte accidentalmente.
+- Usar app password SMTP si el proveedor lo permite.
+- Definir una sola estrategia principal de envio: hilo interno o worker dedicado.
+- Configurar cron de respaldo solo con `--once` si queres recuperacion adicional.
+- Monitorear logs de `web` o `worker`.
+- Hacer backup de `data/postgres`.
+- Hacer backup de `data/media` si los adjuntos deben conservarse.
