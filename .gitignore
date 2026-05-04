@@ -162,6 +162,7 @@ config.yml
 config.json
 media/
 staticfiles/
+data/
 
 # Spyder project settings
 .spyderproject

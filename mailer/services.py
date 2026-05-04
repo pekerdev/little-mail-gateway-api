@@ -45,11 +45,7 @@ def mark_job_failed(job: EmailJob, error: Exception) -> None:
     job.attempts += 1
     job.last_error = str(error)
     job.locked_at = None
-    if job.attempts >= job.max_attempts:
-        job.status = EmailJob.Status.FAILED
-        job.next_attempt_at = None
-    else:
-        job.status = EmailJob.Status.PENDING
-        delay_seconds = min(300, 30 * (2 ** (job.attempts - 1)))
-        job.next_attempt_at = timezone.now() + timezone.timedelta(seconds=delay_seconds)
+    delay_seconds = min(300, 30 * (2 ** (job.attempts - 1)))
+    job.next_attempt_at = timezone.now() + timezone.timedelta(seconds=delay_seconds)
+    job.status = EmailJob.Status.FAILED if job.attempts >= job.max_attempts else EmailJob.Status.PENDING
     job.save(update_fields=["attempts", "last_error", "locked_at", "status", "next_attempt_at", "updated_at"])

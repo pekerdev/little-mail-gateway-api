@@ -1,13 +1,12 @@
-import time
+import traceback
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.db import connection, transaction
-from django.db.models import Q
-from django.utils import timezone
+from django.db import connection
 
+from mailer.config import get_smtp_config
 from mailer.models import EmailJob
-from mailer.services import mark_job_failed, send_email_job
+from mailer.queue import eligible_jobs, process_batch
 
 
 class Command(BaseCommand):
@@ -17,50 +16,72 @@ class Command(BaseCommand):
         parser.add_argument("--once", action="store_true", help="Process the current queue and exit.")
         parser.add_argument("--sleep", type=float, default=settings.EMAIL_GATEWAY_WORKER_SLEEP_SECONDS)
         parser.add_argument("--batch-size", type=int, default=settings.EMAIL_GATEWAY_BATCH_SIZE)
+        parser.add_argument("--dry-run", action="store_true", help="Show eligible jobs without sending them.")
 
     def handle(self, *args, **options):
+        self.verbosity = options["verbosity"]
+        self.show_traceback = options["traceback"]
+        self.dry_run = options["dry_run"]
+
+        self.log_startup(options)
+        if self.dry_run:
+            jobs = eligible_jobs()[: options["batch_size"]]
+            for job in jobs:
+                self.log(1, f"Eligible job {job.id}: to={job.recipients} subject={job.subject!r} attempts={job.attempts}")
+            self.stdout.write(self.style.SUCCESS(f"Found {len(jobs)} eligible email(s)."))
+            return
+
         while True:
-            processed = self.process_batch(options["batch_size"])
+            processed = process_batch(
+                options["batch_size"],
+                log_func=self.log_worker_message,
+                error_func=self.log_worker_error,
+                processing_timeout_seconds=settings.EMAIL_GATEWAY_PROCESSING_TIMEOUT_SECONDS,
+            )
             if options["once"]:
                 self.stdout.write(self.style.SUCCESS(f"Processed {processed} queued email(s)."))
                 return
             if processed == 0:
+                self.log(2, f"No eligible jobs. Sleeping {options['sleep']} second(s).")
+                import time
+
                 time.sleep(options["sleep"])
 
-    def process_batch(self, batch_size):
-        processed = 0
-        while processed < batch_size:
-            job = self.lock_next_job()
-            if job is None:
-                break
-            try:
-                send_email_job(job)
-                self.stdout.write(self.style.SUCCESS(f"Sent email job {job.id}"))
-            except Exception as exc:  # SMTP/network errors must not stop the worker.
-                mark_job_failed(job, exc)
-                self.stderr.write(self.style.ERROR(f"Email job {job.id} failed: {exc}"))
-            processed += 1
-        return processed
+    def log_startup(self, options):
+        pending = EmailJob.objects.filter(status=EmailJob.Status.PENDING).count()
+        processing = EmailJob.objects.filter(status=EmailJob.Status.PROCESSING).count()
+        failed = EmailJob.objects.filter(status=EmailJob.Status.FAILED).count()
+        eligible = eligible_jobs().count()
 
-    def lock_next_job(self):
-        now = timezone.now()
-        with transaction.atomic():
-            queryset = (
-                EmailJob.objects.filter(status=EmailJob.Status.PENDING)
-                .filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
-                .order_by("created_at")
-            )
-            if connection.features.has_select_for_update:
-                select_kwargs = {}
-                if connection.features.has_select_for_update_skip_locked:
-                    select_kwargs["skip_locked"] = True
-                queryset = queryset.select_for_update(**select_kwargs)
+        self.log(
+            1,
+            f"Worker started: settings={settings.SETTINGS_MODULE} db={connection.vendor} "
+            f"config={settings.EMAIL_GATEWAY_CONFIG} once={options['once']} dry_run={self.dry_run}",
+        )
+        self.log(1, f"Queue summary: pending={pending} eligible={eligible} processing={processing} failed={failed}")
 
-            job = queryset.first()
-            if job is None:
-                return None
+        try:
+            config = get_smtp_config()
+        except Exception as exc:
+            self.stderr.write(self.style.ERROR(f"SMTP config error: {exc}"))
+            if self.show_traceback or self.verbosity >= 3:
+                self.stderr.write(traceback.format_exc())
+            return
 
-            job.status = EmailJob.Status.PROCESSING
-            job.locked_at = now
-            job.save(update_fields=["status", "locked_at", "updated_at"])
-            return job
+        self.log(
+            1,
+            f"SMTP config: host={config.host} port={config.port} username={config.username or '<empty>'} "
+            f"from={config.from_name} <{config.from_email}> tls={config.use_tls} ssl={config.use_ssl} timeout={config.timeout}",
+        )
+
+    def log(self, level, message):
+        if self.verbosity >= level:
+            self.stdout.write(message)
+
+    def log_worker_message(self, message):
+        self.log(1, message)
+
+    def log_worker_error(self, job, exc):
+        self.stderr.write(self.style.ERROR(f"Email job {job.id} failed: {exc}"))
+        if self.show_traceback or self.verbosity >= 3:
+            self.stderr.write(traceback.format_exc())

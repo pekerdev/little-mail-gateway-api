@@ -14,6 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app/
 
-RUN chmod +x /app/docker/entrypoint.sh
+RUN addgroup --system app \
+    && adduser --system --ingroup app --uid 10001 app \
+    && mkdir -p /app/media /app/staticfiles \
+    && chown -R app:app /app/media /app/staticfiles \
+    && chmod +x /app/docker/entrypoint.sh
+
+USER app
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

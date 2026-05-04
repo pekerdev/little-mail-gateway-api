@@ -1,0 +1,4 @@
+# Replace /srv/little-mail-gateway-api with the absolute path where this repo is deployed.
+# Install with: crontab docker/worker-cron.example
+
+* * * * * cd /srv/little-mail-gateway-api && docker compose exec -T web python manage.py send_queued_mail --once --verbosity 1 >> ./data/worker-cron.log 2>&1
