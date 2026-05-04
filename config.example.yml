@@ -1,0 +1,10 @@
+smtp:
+  host: smtp.example.com
+  port: 587
+  username: notifications@example.com
+  password: change-me
+  from_email: notifications@example.com
+  from_name: Little Mail Gateway
+  use_tls: true
+  use_ssl: false
+  timeout: 30
