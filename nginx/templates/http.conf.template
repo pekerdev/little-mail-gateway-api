@@ -1,7 +1,6 @@
-# Reference HTTP config. Docker Compose uses nginx/templates/http.conf.template by default.
 server {
     listen 8080;
-    server_name _;
+    server_name ${NGINX_SERVER_NAME};
 
     client_max_body_size 25m;
 

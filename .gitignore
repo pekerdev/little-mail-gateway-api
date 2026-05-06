@@ -163,6 +163,7 @@ config.json
 media/
 staticfiles/
 data/
+certs/
 
 # Spyder project settings
 .spyderproject

@@ -26,6 +26,10 @@ El puerto expuesto por defecto es `8184`:
 
 ```env
 HTTP_PORT=8184
+NGINX_SERVER_NAME=_
+NGINX_TEMPLATE_FILE=./nginx/templates/http.conf.template
+NGINX_CONTAINER_PORT=8080
+NGINX_HEALTHCHECK_URL=http://127.0.0.1:8080/health/
 ```
 
 Docker crea estas carpetas locales si no existen:
@@ -98,6 +102,12 @@ Detalle de cada variable:
 | `POSTGRES_USER` | Usuario PostgreSQL. | `mail_gateway` |
 | `POSTGRES_PASSWORD` | Password PostgreSQL. Cambiar siempre en produccion. | `password-largo` |
 | `HTTP_PORT` | Puerto expuesto en el host para Nginx. | `8184` |
+| `NGINX_SERVER_NAME` | Dominio o IP que Nginx acepta en `server_name`. Usar `_` para catch-all. | `_` o `mail-api.example.com` |
+| `NGINX_TEMPLATE_FILE` | Template Nginx a usar. HTTP por defecto, SSL opcional. | `./nginx/templates/http.conf.template` |
+| `NGINX_CONTAINER_PORT` | Puerto interno donde escucha Nginx. HTTP usa `8080`, SSL usa `8443`. | `8080` |
+| `NGINX_HEALTHCHECK_URL` | URL interna para healthcheck de Nginx. | `http://127.0.0.1:8080/health/` |
+
+El Compose limita `envsubst` a variables `NGINX_*`, para no reemplazar variables internas de Nginx como `$host` o `$proxy_add_x_forwarded_for`.
 
 Notas:
 
@@ -206,6 +216,26 @@ docker compose up --build
 
 La API queda disponible en `http://localhost:8184`.
 
+Mapa de puertos en Docker:
+
+```text
+HTTP:  Host 8184 -> contenedor nginx 8080 -> contenedor web 8000 -> Django
+HTTPS: Host 8184 -> contenedor nginx 8443 -> contenedor web 8000 -> Django
+```
+
+Por eso `nginx/default.conf` debe tener:
+
+```nginx
+listen 8080;
+```
+
+Y `docker-compose.yml` debe publicar:
+
+```yaml
+ports:
+  - "0.0.0.0:${HTTP_PORT:-8184}:${NGINX_CONTAINER_PORT:-8080}"
+```
+
 Por defecto Docker levanta el hilo interno de envio dentro del servicio `web`. El servicio `worker` queda como respaldo/manual y no arranca salvo que lo pidas:
 
 ```powershell
@@ -213,6 +243,69 @@ docker compose --profile worker up -d worker
 ```
 
 Como el hilo interno vive dentro de `web`, el Compose deja Gunicorn con `--workers 1` para preservar un unico proceso enviador y mantener el orden de cola. Si queres escalar a varios procesos web, desactiva `EMAIL_GATEWAY_INLINE_WORKER_ENABLED=false` y usa un unico worker externo.
+
+## SSL Opcional En Nginx
+
+Por defecto el stack usa HTTP en el puerto externo `8184`. Si ya tenes certificado y key probados, colocalos asi:
+
+```text
+certs/server.crt
+certs/server.key
+```
+
+`certs/` esta ignorado por git para no versionar secretos.
+
+Para activar HTTPS en el mismo puerto externo `8184`, cambia estas variables en `.env`:
+
+```env
+HTTP_PORT=8184
+NGINX_SERVER_NAME=mail-api.example.com
+NGINX_TEMPLATE_FILE=./nginx/templates/ssl.conf.template
+NGINX_CONTAINER_PORT=8443
+NGINX_HEALTHCHECK_URL=https://127.0.0.1:8443/health/
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,mail-api.example.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://mail-api.example.com:8184
+```
+
+Si vas a entrar por IP en vez de dominio:
+
+```env
+NGINX_SERVER_NAME=_
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,129.148.40.98
+DJANGO_CSRF_TRUSTED_ORIGINS=https://129.148.40.98:8184
+```
+
+Recrear Nginx:
+
+```bash
+docker compose rm -sf nginx
+docker compose up -d nginx
+```
+
+Probar HTTPS:
+
+```bash
+docker compose exec nginx wget --no-check-certificate -S -O - https://127.0.0.1:8443/health/
+curl -vk https://127.0.0.1:8184/health/
+curl -vk https://mail-api.example.com:8184/health/
+```
+
+Para volver a HTTP:
+
+```env
+NGINX_SERVER_NAME=_
+NGINX_TEMPLATE_FILE=./nginx/templates/http.conf.template
+NGINX_CONTAINER_PORT=8080
+NGINX_HEALTHCHECK_URL=http://127.0.0.1:8080/health/
+DJANGO_CSRF_TRUSTED_ORIGINS=
+```
+
+Y recrear:
+
+```bash
+docker compose rm -sf nginx
+docker compose up -d nginx
+```
 
 ## Ejecutar local con SQLite
 
@@ -298,14 +391,14 @@ Usa solo una estrategia principal de envio para conservar el orden: hilo interno
 
 ## Seguridad Docker
 
-- Solo Nginx expone puerto al host: `8184:8080`.
+- Solo Nginx expone puerto al host: `8184:8080` en HTTP o `8184:8443` en HTTPS.
 - PostgreSQL no publica puertos fuera de la red interna de Compose.
 - La red `backend` es interna; solo `web`, `worker` y `db` participan. Nginx queda en `frontend` y no accede directo a PostgreSQL.
 - `config.yml` se monta de solo lectura en `/app/config.yml`.
 - Adjuntos, static files y datos de PostgreSQL quedan delimitados a `./data/`.
 - Los contenedores `web` y `worker` usan `read_only`, `tmpfs` para rutas temporales y `no-new-privileges:true`.
 - `web` y `worker` usan `cap_drop: [ALL]`.
-- Nginx usa la imagen `nginxinc/nginx-unprivileged`, escucha en `8080` dentro del contenedor y no corre como root. El hardening extra de capabilities queda desactivado en Nginx para evitar resets del puerto publicado en algunos runtimes Docker.
+- Nginx usa la imagen `nginxinc/nginx-unprivileged`, escucha en `8080` para HTTP o `8443` para HTTPS dentro del contenedor y no corre como root. El hardening extra de capabilities queda desactivado en Nginx para evitar resets del puerto publicado en algunos runtimes Docker.
 - La imagen de Django corre con usuario no root `app` (`uid 10001`).
 - `setup-permissions` corre como root solo para preparar ownership de `data/media` y `data/staticfiles`, termina y no queda expuesto.
 - Usa siempre `EMAIL_GATEWAY_API_KEY` con un token largo y no publiques `.env` ni `config.yml`.
@@ -313,6 +406,19 @@ Usa solo una estrategia principal de envio para conservar el orden: hilo interno
 - Si publicas detras de un proxy externo con TLS, agrega el dominio real a `DJANGO_ALLOWED_HOSTS` y `DJANGO_CSRF_TRUSTED_ORIGINS`.
 
 ## Problemas Comunes En Docker
+
+### Verificacion rapida de red
+
+Despues de levantar el stack, estos checks deberian responder `200 OK` o `{"status":"ok"}`:
+
+```bash
+docker compose ps
+docker compose exec nginx wget -S -O - http://web:8000/health/
+docker compose exec nginx wget -S -O - http://127.0.0.1:8080/health/
+curl -v http://127.0.0.1:8184/health/
+```
+
+El primer `wget` prueba `nginx -> web`. El segundo prueba que Nginx este escuchando dentro de su propio contenedor. El `curl` prueba el puerto publicado en el host.
 
 ### `PermissionError: /app/staticfiles/admin`
 
@@ -337,6 +443,35 @@ Este error aparece con la imagen oficial de Nginx cuando corre con hardening est
 ### `host not found in upstream "web"`
 
 Suele aparecer cuando Nginx arranca mientras `web` esta fallando o reiniciando. El Compose ahora agrega `healthcheck` en `web` y Nginx espera a que Django responda `/health/`.
+
+### `curl :8184` conecta pero devuelve `Connection reset by peer`
+
+Si `docker compose exec nginx wget -S -O - http://web:8000/health/` responde `200 OK`, pero el curl al host falla con reset, revisa que Nginx este escuchando en el mismo puerto interno publicado por Compose:
+
+```bash
+cat nginx/templates/http.conf.template
+docker compose exec nginx nginx -T | grep -n "listen"
+```
+
+La configuracion correcta es:
+
+```nginx
+listen 8080;
+```
+
+con este publish:
+
+```yaml
+ports:
+  - "0.0.0.0:${HTTP_PORT:-8184}:${NGINX_CONTAINER_PORT:-8080}"
+```
+
+Si el template activo quedo en `listen 80;`, Docker publica hacia `8080` pero Nginx no atiende ahi. Corregi el template o `NGINX_TEMPLATE_FILE` y recrea:
+
+```bash
+docker compose rm -sf nginx
+docker compose up -d nginx
+```
 
 ### `HTTP/1.1 400 Bad Request` al probar `http://web:8000/health/`
 
@@ -442,6 +577,7 @@ Los correos `failed` no se descartan: el worker los vuelve a tomar automaticamen
 - Crear carpetas locales si estas en Linux: `data/postgres`, `data/media`, `data/staticfiles`.
 - Ajustar permisos de `data/media` y `data/staticfiles` para `uid 10001` si corresponde.
 - Ejecutar `docker compose up --build -d`.
+- Confirmar que `nginx/templates/http.conf.template` tenga `listen 8080` o que `nginx/templates/ssl.conf.template` tenga `listen 8443 ssl`, segun el modo elegido.
 - Revisar `docker compose logs -f web`.
 - Probar `GET /health/`.
 - Enviar un correo JSON de prueba.

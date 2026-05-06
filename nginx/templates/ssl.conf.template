@@ -1,7 +1,13 @@
-# Reference HTTP config. Docker Compose uses nginx/templates/http.conf.template by default.
 server {
-    listen 8080;
-    server_name _;
+    listen 8443 ssl;
+    server_name ${NGINX_SERVER_NAME};
+
+    ssl_certificate /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
 
     client_max_body_size 25m;
 
@@ -18,6 +24,6 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
