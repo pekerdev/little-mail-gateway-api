@@ -262,7 +262,7 @@ HTTP_PORT=8184
 NGINX_SERVER_NAME=mail-api.example.com
 NGINX_TEMPLATE_FILE=./nginx/templates/ssl.conf.template
 NGINX_CONTAINER_PORT=8443
-NGINX_HEALTHCHECK_URL=https://127.0.0.1:8443/health/
+NGINX_HEALTHCHECK_URL=http://127.0.0.1:8081/health/
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,mail-api.example.com
 DJANGO_CSRF_TRUSTED_ORIGINS=https://mail-api.example.com:8184
 ```
@@ -275,6 +275,8 @@ DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,129.148.40.98
 DJANGO_CSRF_TRUSTED_ORIGINS=https://129.148.40.98:8184
 ```
 
+Para SSL estricto conviene usar dominio real en `NGINX_SERVER_NAME`, no `_`. El template SSL rechaza handshakes TLS que no lleguen con ese SNI/dominio, asi la app no responde por IP ni por hosts no esperados.
+
 Recrear Nginx:
 
 ```bash
@@ -285,10 +287,18 @@ docker compose up -d nginx
 Probar HTTPS:
 
 ```bash
-docker compose exec nginx wget --no-check-certificate -S -O - https://127.0.0.1:8443/health/
-curl -vk https://127.0.0.1:8184/health/
+docker compose exec nginx wget -S -O - http://127.0.0.1:8081/health/
 curl -vk https://mail-api.example.com:8184/health/
 ```
+
+Para comprobar que hosts incorrectos no funcionan:
+
+```bash
+curl -vk https://127.0.0.1:8184/health/
+curl -vk --resolve mail-api.example.com:8184:127.0.0.1 https://mail-api.example.com:8184/health/
+```
+
+El primero deberia fallar o cerrar handshake. El segundo deberia responder si `mail-api.example.com` coincide con `NGINX_SERVER_NAME`.
 
 Para volver a HTTP:
 
